@@ -116,11 +116,18 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ----------------- SESSION STATE STATE MANAGEMENT -----------------
-# Pre-set the API key provided by the user
 DEFAULT_API_KEY = "AIzaSyDyIzYSYd6m-EIZZh9fGxA_JAJoppXJUUQ"
 
 if "google_api_key" not in st.session_state:
-    st.session_state.google_api_key = DEFAULT_API_KEY
+    api_key_secrets = None
+    try:
+        # Check if secrets.toml or Streamlit Cloud Secrets has it
+        if "GEMINI_API_KEY" in st.secrets:
+            api_key_secrets = st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        pass
+        
+    st.session_state.google_api_key = api_key_secrets or os.environ.get("GEMINI_API_KEY") or DEFAULT_API_KEY
 
 if "rag_system" not in st.session_state:
     st.session_state.rag_system = None
