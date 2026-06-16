@@ -7,6 +7,25 @@ import threading
 import requests
 import uvicorn
 
+# Helper to safely parse retrieved chunks in multiple formats (API dict vs local langchain objects)
+def parse_chunk(chunk):
+    if isinstance(chunk, dict):
+        page_content = chunk.get("page_content", "")
+        metadata = chunk.get("metadata", {}) or {}
+        score = chunk.get("score", 0.0)
+    elif isinstance(chunk, (list, tuple)):
+        # LangChain similarity_search_with_score returns (Document, score)
+        doc = chunk[0]
+        score = chunk[1] if len(chunk) > 1 else 0.0
+        page_content = getattr(doc, "page_content", "")
+        metadata = getattr(doc, "metadata", {}) or {}
+    else:
+        # LangChain Document object directly
+        page_content = getattr(chunk, "page_content", "")
+        metadata = getattr(doc, "metadata", {}) or {}
+        score = 0.0
+    return page_content, metadata, score
+
 # Set up page config
 st.set_page_config(
     page_title="Rungta Hospital | Doctor's Co-Pilot",
@@ -354,9 +373,9 @@ with tab_chat:
         with st.expander("🔍 View Retrieved Clinical Chunks from Backend Vector DB (Top 10)"):
             st.write("These chunks were injected directly into the LLM context by the backend:")
             for idx, chunk in enumerate(results["retrieved_chunks"]):
-                p_id = chunk["metadata"].get("patient_id", "N/A")
-                d_name = chunk["metadata"].get("doctor_name", "N/A")
-                score = chunk.get("score", 0.0)
+                page_content, metadata, score = parse_chunk(chunk)
+                p_id = metadata.get("patient_id", "N/A")
+                d_name = metadata.get("doctor_name", "N/A")
                 
                 # Check if this is a data leak (patient_id mismatch)
                 is_leak = (extracted_id != "UNKNOWN" and p_id != extracted_id)
@@ -367,7 +386,7 @@ with tab_chat:
                     <div class="{card_style}">
                         <strong>Chunk #{idx+1} (Similarity Score: {score:.4f}){leak_warning}</strong><br/>
                         <span class="badge-patient">Patient: {p_id}</span> <span class="badge-doctor">Doctor: {d_name}</span>
-                        <p style="margin-top: 8px; font-style: italic; color: #334155;">"{chunk['page_content']}"</p>
+                        <p style="margin-top: 8px; font-style: italic; color: #334155;">"{page_content}"</p>
                     </div>
                 """, unsafe_allow_html=True)
 
@@ -417,19 +436,25 @@ with tab_comparison:
                     st.subheader("🔴 Naive Similarity Search")
                     st.info("In this mode, we embed the user query and search all database records globally.")
                     
-                    leaks = sum(1 for chunk in naive_results["retrieved_chunks"] if chunk["metadata"].get("patient_id") != "PT-8829")
+                    leaks = 0
+                    for chunk in naive_results["retrieved_chunks"]:
+                        _, metadata, _ = parse_chunk(chunk)
+                        if metadata.get("patient_id") != "PT-8829":
+                            leaks += 1
+                            
                     st.error(f"Results retrieved: 10 chunks. Mismatched patient chunks: {leaks}/10.")
                     
                     for idx, chunk in enumerate(naive_results["retrieved_chunks"][:5]):
-                        p_id = chunk["metadata"].get("patient_id", "N/A")
+                        page_content, metadata, score = parse_chunk(chunk)
+                        p_id = metadata.get("patient_id", "N/A")
                         is_leak = (p_id != "PT-8829")
                         card_style = "danger-highlight" if is_leak else "success-highlight"
                         leak_lbl = "🚨 DATA LEAK" if is_leak else "✅ Correct Patient"
                         st.markdown(f"""
                             <div class="{card_style}">
                                 <strong>Rank #{idx+1} ({leak_lbl})</strong><br/>
-                                Similarity: {chunk['score']:.4f} | Patient: <b>{p_id}</b> | Doctor: {chunk['metadata'].get('doctor_name')}
-                                <p style="margin-top: 5px; font-size: 0.9rem;">"{chunk['page_content']}"</p>
+                                Similarity: {score:.4f} | Patient: <b>{p_id}</b> | Doctor: {metadata.get('doctor_name')}
+                                <p style="margin-top: 5px; font-size: 0.9rem;">"{page_content}"</p>
                             </div>
                         """, unsafe_allow_html=True)
                         
@@ -441,12 +466,13 @@ with tab_comparison:
                     st.success(f"Results retrieved: {len(filtered_results['retrieved_chunks'])} chunks. Mismatched patient chunks: 0.")
                     
                     for idx, chunk in enumerate(filtered_results["retrieved_chunks"][:5]):
-                        p_id = chunk["metadata"].get("patient_id", "N/A")
+                        page_content, metadata, score = parse_chunk(chunk)
+                        p_id = metadata.get("patient_id", "N/A")
                         st.markdown(f"""
                             <div class="success-highlight">
                                 <strong>Rank #{idx+1} (✅ Correct Patient)</strong><br/>
-                                Similarity: {chunk['score']:.4f} | Patient: <b>{p_id}</b> | Doctor: {chunk['metadata'].get('doctor_name')}
-                                <p style="margin-top: 5px; font-size: 0.9rem;">"{chunk['page_content']}"</p>
+                                Similarity: {score:.4f} | Patient: <b>{p_id}</b> | Doctor: {metadata.get('doctor_name')}
+                                <p style="margin-top: 5px; font-size: 0.9rem;">"{page_content}"</p>
                             </div>
                         """, unsafe_allow_html=True)
             else:
