@@ -11,17 +11,20 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Global default API key moved to the backend
+DEFAULT_API_KEY = "AIzaSyDyIzYSYd6m-EIZZh9fGxA_JAJoppXJUUQ"
+
 # Global instance of RAG system
 rag_instance: Optional[DoctorCoPilotRAG] = None
 
 class InitializeRequest(BaseModel):
-    api_key: str = Field(..., description="Gemini API Key")
+    api_key: Optional[str] = Field(None, description="Gemini API Key")
 
 class QueryRequest(BaseModel):
     query: str = Field(..., description="Raw text clinical query")
     use_filter: bool = Field(True, description="Whether to apply deterministic metadata pre-filtering")
     k: int = Field(10, description="Number of chunks to retrieve")
-    api_key: str = Field(..., description="Gemini API Key")
+    api_key: Optional[str] = Field(None, description="Gemini API Key")
 
 @app.get("/api/health")
 def health_check():
@@ -30,10 +33,11 @@ def health_check():
 @app.post("/api/initialize")
 def initialize_database(req: InitializeRequest):
     global rag_instance
+    api_key = req.api_key or DEFAULT_API_KEY
     try:
         # Re-initialize only if key changes or not initialized yet
-        if rag_instance is None or rag_instance.api_key != req.api_key:
-            rag_instance = DoctorCoPilotRAG(google_api_key=req.api_key)
+        if rag_instance is None or rag_instance.api_key != api_key:
+            rag_instance = DoctorCoPilotRAG(google_api_key=api_key)
             mock_docs = get_all_mock_documents()
             rag_instance.load_data(mock_docs)
             
@@ -53,10 +57,11 @@ def initialize_database(req: InitializeRequest):
 @app.post("/api/query")
 def execute_query(req: QueryRequest):
     global rag_instance
+    api_key = req.api_key or DEFAULT_API_KEY
     try:
         # Ensure database is initialized
-        if rag_instance is None or rag_instance.api_key != req.api_key:
-            rag_instance = DoctorCoPilotRAG(google_api_key=req.api_key)
+        if rag_instance is None or rag_instance.api_key != api_key:
+            rag_instance = DoctorCoPilotRAG(google_api_key=api_key)
             mock_docs = get_all_mock_documents()
             rag_instance.load_data(mock_docs)
             
