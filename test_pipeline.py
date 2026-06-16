@@ -5,7 +5,7 @@ from data.mock_data import get_all_mock_documents
 
 def main():
     # Use the provided API Key or get it from environment
-    api_key = os.environ.get("GEMINI_API_KEY", "AIzaSyDyIzYSYd6m-EIZZh9fGxA_JAJoppXJUUQ")
+    api_key = os.environ.get("GEMINI_API_KEY", "")
     
     print("======================================================================")
     print("🩺 STARTING CLINICAL CO-PILOT RAG VALIDATION")

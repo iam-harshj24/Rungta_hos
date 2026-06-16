@@ -142,7 +142,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ----------------- SESSION STATE MANAGEMENT -----------------
-DEFAULT_API_KEY = "AIzaSyDyIzYSYd6m-EIZZh9fGxA_JAJoppXJUUQ"
+DEFAULT_API_KEY = ""
 
 if "google_api_key" not in st.session_state:
     api_key_secrets = None
