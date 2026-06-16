@@ -3,9 +3,6 @@ import streamlit as st
 import pandas as pd
 import os
 import time
-import threading
-import requests
-import uvicorn
 
 # Helper to safely parse retrieved chunks in multiple formats (API dict vs local langchain objects)
 def parse_chunk(chunk):
@@ -34,32 +31,14 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ----------------- BACKGROUND FASTAPI BACKEND STARTUP -----------------
-# We start the FastAPI backend in a background thread on 127.0.0.1:8000
-# This separates frontend and backend codebases, while keeping deployment
-# to Streamlit Cloud fully containerized and one-click.
-BACKEND_URL = "http://127.0.0.1:8000"
+# ----------------- IN-MEMORY FASTAPI BACKEND CLIENT -----------------
+# We initialize the FastAPI app via TestClient. This decouples the frontend
+# and backend codebases, while bypassing all network/port-binding restrictions
+# on containerized hosts like Streamlit Cloud.
+from fastapi.testclient import TestClient
+from backend import app as fastapi_app
 
-def run_backend_server():
-    try:
-        # Import the backend app here to prevent top-level pollution
-        from backend import app as fastapi_app
-        uvicorn.run(fastapi_app, host="127.0.0.1", port=8000, log_level="warning")
-    except Exception as e:
-        print(f"Error starting FastAPI backend: {e}")
-
-# Start the backend thread if it is not already running
-if not any(t.name == "FastAPIBackendThread" for t in threading.enumerate()):
-    backend_thread = threading.Thread(target=run_backend_server, name="FastAPIBackendThread", daemon=True)
-    backend_thread.start()
-    # Wait for the backend to start up and respond to health check
-    for _ in range(10):
-        try:
-            res = requests.get(f"{BACKEND_URL}/api/health")
-            if res.status_code == 200:
-                break
-        except requests.exceptions.ConnectionError:
-            time.sleep(0.5)
+client = TestClient(fastapi_app)
 
 # Custom premium CSS injection
 st.markdown("""
@@ -219,8 +198,8 @@ if st.session_state.google_api_key:
         with st.sidebar:
             with st.spinner("Initializing Backend Vector DB..."):
                 try:
-                    res = requests.post(
-                        f"{BACKEND_URL}/api/initialize",
+                    res = client.post(
+                        "/api/initialize",
                         json={"api_key": st.session_state.google_api_key}
                     )
                     if res.status_code == 200:
@@ -287,8 +266,8 @@ with tab_chat:
                 
                 try:
                     # Request analysis from FastAPI backend
-                    response = requests.post(
-                        f"{BACKEND_URL}/api/query",
+                    response = client.post(
+                        "/api/query",
                         json={
                             "query": chat_input_val,
                             "use_filter": use_filter,
@@ -406,8 +385,8 @@ with tab_comparison:
         
         try:
             # Query backend in Naive Mode
-            res_naive = requests.post(
-                f"{BACKEND_URL}/api/query",
+            res_naive = client.post(
+                "/api/query",
                 json={
                     "query": test_query,
                     "use_filter": False,
@@ -417,8 +396,8 @@ with tab_comparison:
             )
             
             # Query backend in Filtered Mode
-            res_filtered = requests.post(
-                f"{BACKEND_URL}/api/query",
+            res_filtered = client.post(
+                "/api/query",
                 json={
                     "query": test_query,
                     "use_filter": True,
@@ -488,7 +467,7 @@ with tab_registry:
     st.write("Browse all simulated clinical summaries uploaded to the vector store:")
     
     try:
-        res = requests.get(f"{BACKEND_URL}/api/patients")
+        res = client.get("/api/patients")
         if res.status_code == 200:
             patients_data = res.json()["data"]
             df_data = []
