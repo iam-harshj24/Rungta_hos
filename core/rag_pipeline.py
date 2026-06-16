@@ -172,7 +172,7 @@ class DoctorCoPilotRAG:
             )
             self.vector_store = InMemoryVectorStore(embedding=self.embeddings)
             self.llm = ChatGoogleGenerativeAI(
-                model="gemini-1.5-flash",
+                model="gemini-2.5-flash",
                 google_api_key=google_api_key,
                 temperature=0.0
             )

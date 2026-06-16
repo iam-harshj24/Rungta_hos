@@ -221,11 +221,10 @@ st.markdown('<div class="main-title">🩺 The Doctor\'s Co-Pilot</div>', unsafe_
 st.markdown('<div class="main-subtitle">Clinical RAG Decision Support System — Rungta Hospital Portal (De-coupled Arch)</div>', unsafe_allow_html=True)
 
 # Create tabs
-tab_chat, tab_comparison, tab_registry, tab_architecture = st.tabs([
+tab_chat, tab_comparison, tab_registry = st.tabs([
     "💬 Co-Pilot Terminal", 
     "📊 Naive vs Filtered Search Analysis", 
-    "🗂️ Patient Registry", 
-    "📐 System Architecture"
+    "🗂️ Patient Registry"
 ])
 
 # ----------------- TAB 1: CO-PILOT CHAT TERMINAL -----------------
@@ -491,62 +490,3 @@ with tab_registry:
             st.error("Failed to load patients registry from backend.")
     except Exception as e:
         st.error(f"Failed to connect to backend: {e}")
-
-# ----------------- TAB 4: SYSTEM ARCHITECTURE -----------------
-with tab_architecture:
-    st.markdown("### Decoupled Frontend-Backend Architecture")
-    st.write("This application implements a professional **decoupled architecture**, splitting client-side UI and server-side RAG logic:")
-    
-    col_arch1, col_arch2 = st.columns(2)
-    with col_arch1:
-        st.markdown("""
-        #### 🎨 Streamlit Frontend
-        * **Purpose**: Serves the user interface and handles user inputs.
-        * **Scope**: 
-          * No AI SDK imports.
-          * No API key leakage in client code.
-          * Does not contain prompt strings.
-          * Communicates solely via HTTP REST API to the backend.
-        * **Lifecycle**: Runs a background daemon thread that manages and monitors the FastAPI server.
-        """)
-        
-    with col_arch2:
-        st.markdown("""
-        #### ⚙️ FastAPI Backend
-        * **Purpose**: Hosts the vector database, implements the RAG pipeline, and executes AI models.
-        * **Scope**:
-          * Parses and extracts patient ID (`PT-XXXX`) deterministically.
-          * Manages the LangChain In-Memory Vector Store.
-          * Runs similarity search with metadata pre-filtering.
-          * Formats clinical prompts and makes secure LLM calls to Gemini.
-        """)
-        
-    st.markdown("""
-    ---
-    #### 📐 Data Flow Diagram
-    ```mermaid
-    sequenceDiagram
-        autonumber
-        actor Doctor as Physician / User
-        participant FE as Streamlit Frontend (app.py)
-        participant BE as FastAPI Backend (backend.py)
-        participant VDB as Vector Store (LangChain)
-        participant LLM as Gemini API (Google Cloud)
-        
-        Doctor->>FE: Click suggestion / Type query
-        FE->>BE: POST /api/query {query, use_filter, k, api_key}
-        Note over BE: Extracts Patient ID (e.g. PT-8829)
-        alt Filtered Mode Active
-            BE->>VDB: Query similarity search with filter (patient_id == PT-8829)
-            VDB-->>BE: Return top 10 chunks strictly for PT-8829
-        else Naive Mode Active
-            BE->>VDB: Query similarity search globally
-            VDB-->>BE: Return top 10 chunks globally (contains leaks!)
-        end
-        Note over BE: Formats prompt with strict patient ID validation instructions
-        BE->>LLM: Request summary generation (Gemini-1.5-Flash)
-        LLM-->>BE: Return clinical summary response
-        BE-->>FE: Return JSON {query, patient_id, summary, chunks, metrics}
-        FE->>Doctor: Render formatted clinical summary & show chunks
-    ```
-    """)
