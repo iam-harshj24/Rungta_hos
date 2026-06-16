@@ -3,8 +3,9 @@ import streamlit as st
 import pandas as pd
 import os
 import time
-from core.rag_pipeline import DoctorCoPilotRAG
-from data.mock_data import get_all_mock_documents
+import threading
+import requests
+import uvicorn
 
 # Set up page config
 st.set_page_config(
@@ -13,6 +14,33 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# ----------------- BACKGROUND FASTAPI BACKEND STARTUP -----------------
+# We start the FastAPI backend in a background thread on 127.0.0.1:8000
+# This separates frontend and backend codebases, while keeping deployment
+# to Streamlit Cloud fully containerized and one-click.
+BACKEND_URL = "http://127.0.0.1:8000"
+
+def run_backend_server():
+    try:
+        # Import the backend app here to prevent top-level pollution
+        from backend import app as fastapi_app
+        uvicorn.run(fastapi_app, host="127.0.0.1", port=8000, log_level="warning")
+    except Exception as e:
+        print(f"Error starting FastAPI backend: {e}")
+
+# Start the backend thread if it is not already running
+if not any(t.name == "FastAPIBackendThread" for t in threading.enumerate()):
+    backend_thread = threading.Thread(target=run_backend_server, name="FastAPIBackendThread", daemon=True)
+    backend_thread.start()
+    # Wait for the backend to start up and respond to health check
+    for _ in range(10):
+        try:
+            res = requests.get(f"{BACKEND_URL}/api/health")
+            if res.status_code == 200:
+                break
+        except requests.exceptions.ConnectionError:
+            time.sleep(0.5)
 
 # Custom premium CSS injection
 st.markdown("""
@@ -115,22 +143,17 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ----------------- SESSION STATE STATE MANAGEMENT -----------------
+# ----------------- SESSION STATE MANAGEMENT -----------------
 DEFAULT_API_KEY = "AIzaSyDyIzYSYd6m-EIZZh9fGxA_JAJoppXJUUQ"
 
 if "google_api_key" not in st.session_state:
     api_key_secrets = None
     try:
-        # Check if secrets.toml or Streamlit Cloud Secrets has it
         if "GEMINI_API_KEY" in st.secrets:
             api_key_secrets = st.secrets["GEMINI_API_KEY"]
     except Exception:
         pass
-        
     st.session_state.google_api_key = api_key_secrets or os.environ.get("GEMINI_API_KEY") or DEFAULT_API_KEY
-
-if "rag_system" not in st.session_state:
-    st.session_state.rag_system = None
 
 if "db_loaded" not in st.session_state:
     st.session_state.db_loaded = False
@@ -138,8 +161,11 @@ if "db_loaded" not in st.session_state:
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-if "selected_query" not in st.session_state:
-    st.session_state.selected_query = ""
+if "query_text_input" not in st.session_state:
+    st.session_state.query_text_input = ""
+
+if "last_results" not in st.session_state:
+    st.session_state.last_results = None
 
 # ----------------- SIDEBAR CONFIGURATION -----------------
 st.sidebar.image("https://img.icons8.com/color/96/000000/stethoscope.png", width=64)
@@ -154,7 +180,6 @@ api_key_input = st.sidebar.text_input(
 
 if api_key_input != st.session_state.google_api_key:
     st.session_state.google_api_key = api_key_input
-    st.session_state.rag_system = None
     st.session_state.db_loaded = False
     st.rerun()
 
@@ -169,29 +194,33 @@ top_k = st.sidebar.slider("Chunks to Retrieve (k)", min_value=1, max_value=20, v
 
 st.sidebar.divider()
 
-# Load Vector Database
+# Initialize Database on Backend
 if st.session_state.google_api_key:
     if not st.session_state.db_loaded:
         with st.sidebar:
-            with st.spinner("Initializing Vector DB..."):
+            with st.spinner("Initializing Backend Vector DB..."):
                 try:
-                    rag = DoctorCoPilotRAG(google_api_key=st.session_state.google_api_key)
-                    mock_docs = get_all_mock_documents()
-                    rag.load_data(mock_docs)
-                    st.session_state.rag_system = rag
-                    st.session_state.db_loaded = True
-                    st.success("Vector DB Initialized!")
+                    res = requests.post(
+                        f"{BACKEND_URL}/api/initialize",
+                        json={"api_key": st.session_state.google_api_key}
+                    )
+                    if res.status_code == 200:
+                        init_data = res.json()
+                        st.session_state.db_loaded = True
+                        st.success("Vector DB Initialized!")
+                    else:
+                        st.error(f"Backend init failed: {res.text}")
                 except Exception as e:
-                    st.error(f"Initialization failed: {e}")
+                    st.error(f"Failed to connect to backend: {e}")
 else:
     st.sidebar.warning("Please enter a valid Gemini API Key to initialize the RAG database.")
 
 if st.session_state.db_loaded:
-    st.sidebar.success(f"🟢 DB Status: Active\n- Loaded {len(get_all_mock_documents())} Clinical Chunks (Simulated 50,000 summaries index)")
+    st.sidebar.success("🟢 DB Status: Active on Backend\n- 50,000 Chunks Indexed (Simulated)")
 
 # ----------------- HEADER -----------------
 st.markdown('<div class="main-title">🩺 The Doctor\'s Co-Pilot</div>', unsafe_allow_html=True)
-st.markdown('<div class="main-subtitle">Clinical RAG Decision Support System — Rungta Hospital Internal Portal</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-subtitle">Clinical RAG Decision Support System — Rungta Hospital Portal (De-coupled Arch)</div>', unsafe_allow_html=True)
 
 # Create tabs
 tab_chat, tab_comparison, tab_registry, tab_architecture = st.tabs([
@@ -210,18 +239,20 @@ with tab_chat:
     col_q1, col_q2, col_q3 = st.columns(3)
     with col_q1:
         if st.button("Summarize previous cardiac complications for PT-8829"):
-            st.session_state.selected_query = "Summarize the previous cardiac complications for patient PT-8829."
+            st.session_state.query_text_input = "Summarize the previous cardiac complications for patient PT-8829."
+            st.rerun()
     with col_q2:
         if st.button("Summarize clinical course and surgeries for PT-1234"):
-            st.session_state.selected_query = "Summarize clinical course and surgeries for patient PT-1234."
+            st.session_state.query_text_input = "Summarize clinical course and surgeries for patient PT-1234."
+            st.rerun()
     with col_q3:
         if st.button("What is glycemic control plan for PT-5566?"):
-            st.session_state.selected_query = "What is the glycemic control and medication plan for patient PT-5566?"
+            st.session_state.query_text_input = "What is the glycemic control and medication plan for patient PT-5566?"
+            st.rerun()
 
-    # Chat input
+    # Chat input bound directly to session state
     chat_input_val = st.text_input(
         "Enter your search query about a patient:",
-        value=st.session_state.selected_query,
         key="query_text_input",
         placeholder="e.g., Summarize the previous cardiac complications for patient PT-8829."
     )
@@ -232,32 +263,39 @@ with tab_chat:
         elif not chat_input_val.strip():
             st.warning("Please enter a query.")
         else:
-            with st.spinner("Retrieving from Vector Database and generating summary..."):
+            with st.spinner("Requesting RAG analysis from Backend API..."):
                 use_filter = (rag_mode == "Deterministic Metadata Filter (Recommended)")
                 
-                # Run RAG execution
-                results = st.session_state.rag_system.execute_workflow(
-                    query=chat_input_val,
-                    use_filter=use_filter,
-                    k=top_k
-                )
-                
-                # Store in session state for tab displays
-                st.session_state.last_results = results
-                
-                # Append to history
-                st.session_state.chat_history.append({
-                    "query": chat_input_val,
-                    "summary": results["summary"],
-                    "use_filter": use_filter,
-                    "metrics": results["metrics"]
-                })
-                
-                # Reset selected query
-                st.session_state.selected_query = ""
+                try:
+                    # Request analysis from FastAPI backend
+                    response = requests.post(
+                        f"{BACKEND_URL}/api/query",
+                        json={
+                            "query": chat_input_val,
+                            "use_filter": use_filter,
+                            "k": top_k,
+                            "api_key": st.session_state.google_api_key
+                        }
+                    )
+                    
+                    if response.status_code == 200:
+                        results = response.json()
+                        st.session_state.last_results = results
+                        
+                        # Append to history
+                        st.session_state.chat_history.append({
+                            "query": chat_input_val,
+                            "summary": results["summary"],
+                            "use_filter": use_filter,
+                            "metrics": results["metrics"]
+                        })
+                    else:
+                        st.error(f"Backend Query Failed: {response.text}")
+                except Exception as e:
+                    st.error(f"Failed to connect to backend: {e}")
 
     # Display results if available
-    if "last_results" in st.session_state:
+    if st.session_state.last_results:
         results = st.session_state.last_results
         
         # Display performance metrics
@@ -313,11 +351,12 @@ with tab_chat:
         """, unsafe_allow_html=True)
         
         # Expandable section for retrieved chunks
-        with st.expander("🔍 View Retrieved Clinical Chunks from Vector DB (Top 10)"):
-            st.write("These chunks were injected directly into the LLM context:")
-            for idx, (doc, score) in enumerate(results["retrieved_chunks"]):
-                p_id = doc.metadata.get("patient_id", "N/A")
-                d_name = doc.metadata.get("doctor_name", "N/A")
+        with st.expander("🔍 View Retrieved Clinical Chunks from Backend Vector DB (Top 10)"):
+            st.write("These chunks were injected directly into the LLM context by the backend:")
+            for idx, chunk in enumerate(results["retrieved_chunks"]):
+                p_id = chunk["metadata"].get("patient_id", "N/A")
+                d_name = chunk["metadata"].get("doctor_name", "N/A")
+                score = chunk.get("score", 0.0)
                 
                 # Check if this is a data leak (patient_id mismatch)
                 is_leak = (extracted_id != "UNKNOWN" and p_id != extracted_id)
@@ -328,12 +367,12 @@ with tab_chat:
                     <div class="{card_style}">
                         <strong>Chunk #{idx+1} (Similarity Score: {score:.4f}){leak_warning}</strong><br/>
                         <span class="badge-patient">Patient: {p_id}</span> <span class="badge-doctor">Doctor: {d_name}</span>
-                        <p style="margin-top: 8px; font-style: italic; color: #334155;">"{doc.page_content}"</p>
+                        <p style="margin-top: 8px; font-style: italic; color: #334155;">"{chunk['page_content']}"</p>
                     </div>
                 """, unsafe_allow_html=True)
 
 
-# ----------------- TAB 2: NAIVE VS FILTERED SEARCH ANALYSIS -----------------
+# ----------------- TAB 2: NAIVE VS FILTERED SEARCH COMPARISON -----------------
 with tab_comparison:
     st.markdown("### The Danger of Naive RAG in Medical Records")
     st.write(
@@ -343,134 +382,166 @@ with tab_comparison:
     
     col1, col2 = st.columns(2)
     
-    # Run comparison if pipeline is ready
     if st.session_state.db_loaded:
         test_query = "Summarize the previous cardiac complications for patient PT-8829."
         
-        # Run Naive search
-        with col1:
-            st.subheader("🔴 Naive Similarity Search")
-            st.info("In this mode, we embed the user query and search all database records globally.")
+        try:
+            # Query backend in Naive Mode
+            res_naive = requests.post(
+                f"{BACKEND_URL}/api/query",
+                json={
+                    "query": test_query,
+                    "use_filter": False,
+                    "k": 10,
+                    "api_key": st.session_state.google_api_key
+                }
+            )
             
-            naive_results = st.session_state.rag_system.retrieve_chunks(test_query, use_filter=False, k=10)
+            # Query backend in Filtered Mode
+            res_filtered = requests.post(
+                f"{BACKEND_URL}/api/query",
+                json={
+                    "query": test_query,
+                    "use_filter": True,
+                    "k": 10,
+                    "api_key": st.session_state.google_api_key
+                }
+            )
             
-            # Count leaking documents
-            leaks = sum(1 for doc, _ in naive_results if doc.metadata.get("patient_id") != "PT-8829")
-            
-            st.error(f"Results retrieved: 10 chunks. Mismatched patient chunks: {leaks}/10.")
-            
-            for idx, (doc, score) in enumerate(naive_results[:5]):
-                p_id = doc.metadata.get("patient_id", "N/A")
-                is_leak = (p_id != "PT-8829")
-                card_style = "danger-highlight" if is_leak else "success-highlight"
-                leak_lbl = "🚨 DATA LEAK" if is_leak else "✅ Correct Patient"
-                st.markdown(f"""
-                    <div class="{card_style}">
-                        <strong>Rank #{idx+1} ({leak_lbl})</strong><br/>
-                        Similarity: {score:.4f} | Patient: <b>{p_id}</b> | Doctor: {doc.metadata.get('doctor_name')}
-                        <p style="margin-top: 5px; font-size: 0.9rem;">"{doc.page_content}"</p>
-                    </div>
-                """, unsafe_allow_html=True)
+            if res_naive.status_code == 200 and res_filtered.status_code == 200:
+                naive_results = res_naive.json()
+                filtered_results = res_filtered.json()
                 
-        # Run Filtered search
-        with col2:
-            st.subheader("🟢 Deterministic Metadata-Filtered Search")
-            st.info("In this mode, we parse 'PT-8829', apply `patient_id == 'PT-8829'` metadata filter, and then do similarity search.")
-            
-            filtered_results = st.session_state.rag_system.retrieve_chunks(test_query, use_filter=True, k=10)
-            
-            st.success(f"Results retrieved: {len(filtered_results)} chunks. Mismatched patient chunks: 0.")
-            
-            for idx, (doc, score) in enumerate(filtered_results[:5]):
-                p_id = doc.metadata.get("patient_id", "N/A")
-                st.markdown(f"""
-                    <div class="success-highlight">
-                        <strong>Rank #{idx+1} (✅ Correct Patient)</strong><br/>
-                        Similarity: {score:.4f} | Patient: <b>{p_id}</b> | Doctor: {doc.metadata.get('doctor_name')}
-                        <p style="margin-top: 5px; font-size: 0.9rem;">"{doc.page_content}"</p>
-                    </div>
-                """, unsafe_allow_html=True)
-                
-        st.markdown("""
-            ---
-            ### Why does this happen?
-            1. **Semantic Dominance**: The query "cardiac complications" has strong semantic overlap with severe cardiac complications notes (e.g., *ventricular fibrillation*, *CPR*, *CABG surgery*, *cardiogenic shock*), which are present in **PT-1234's** chart. 
-            2. **Low Token Weight of ID**: The patient ID `"PT-8829"` represents only a single token or character sequence in the embedding, which contributes very little to the overall cosine similarity score compared to strong clinical words like "cardiac", "complications", "ventricular", "infarction".
-            3. **The Result**: A naive vector search retrieves severe cardiac arrest files from other patients and displays them as PT-8829's records. When fed to an LLM, the LLM generates a summary indicating that PT-8829 suffered cardiac arrest, was shocked with 200J, and got an ICD. **This is a severe, life-threatening medical hallucination caused by incorrect RAG retrieval.**
-            4. **The Engineering Fix**: Apply a deterministic metadata pre-filter! Extracting the patient ID and filtering the vector space ensures 100% data partition safety.
-        """)
+                # Run Naive display
+                with col1:
+                    st.subheader("🔴 Naive Similarity Search")
+                    st.info("In this mode, we embed the user query and search all database records globally.")
+                    
+                    leaks = sum(1 for chunk in naive_results["retrieved_chunks"] if chunk["metadata"].get("patient_id") != "PT-8829")
+                    st.error(f"Results retrieved: 10 chunks. Mismatched patient chunks: {leaks}/10.")
+                    
+                    for idx, chunk in enumerate(naive_results["retrieved_chunks"][:5]):
+                        p_id = chunk["metadata"].get("patient_id", "N/A")
+                        is_leak = (p_id != "PT-8829")
+                        card_style = "danger-highlight" if is_leak else "success-highlight"
+                        leak_lbl = "🚨 DATA LEAK" if is_leak else "✅ Correct Patient"
+                        st.markdown(f"""
+                            <div class="{card_style}">
+                                <strong>Rank #{idx+1} ({leak_lbl})</strong><br/>
+                                Similarity: {chunk['score']:.4f} | Patient: <b>{p_id}</b> | Doctor: {chunk['metadata'].get('doctor_name')}
+                                <p style="margin-top: 5px; font-size: 0.9rem;">"{chunk['page_content']}"</p>
+                            </div>
+                        """, unsafe_allow_html=True)
+                        
+                # Run Filtered display
+                with col2:
+                    st.subheader("🟢 Deterministic Metadata-Filtered Search")
+                    st.info("In this mode, we parse 'PT-8829', apply `patient_id == 'PT-8829'` metadata filter on the backend, and then do similarity search.")
+                    
+                    st.success(f"Results retrieved: {len(filtered_results['retrieved_chunks'])} chunks. Mismatched patient chunks: 0.")
+                    
+                    for idx, chunk in enumerate(filtered_results["retrieved_chunks"][:5]):
+                        p_id = chunk["metadata"].get("patient_id", "N/A")
+                        st.markdown(f"""
+                            <div class="success-highlight">
+                                <strong>Rank #{idx+1} (✅ Correct Patient)</strong><br/>
+                                Similarity: {chunk['score']:.4f} | Patient: <b>{p_id}</b> | Doctor: {chunk['metadata'].get('doctor_name')}
+                                <p style="margin-top: 5px; font-size: 0.9rem;">"{chunk['page_content']}"</p>
+                            </div>
+                        """, unsafe_allow_html=True)
+            else:
+                st.error("Error fetching comparison results from backend.")
+        except Exception as e:
+            st.error(f"Failed to connect to backend: {e}")
     else:
         st.info("Please enter a Gemini API Key to run the comparison analysis.")
-
 
 # ----------------- TAB 3: PATIENT REGISTRY -----------------
 with tab_registry:
     st.markdown("### Patient Registry")
     st.write("Browse all simulated clinical summaries uploaded to the vector store:")
     
-    mock_docs = get_all_mock_documents()
-    df_data = []
-    for doc in mock_docs:
-        df_data.append({
-            "Patient ID": doc["patient_id"],
-            "Doctor In Charge": doc["doctor_name"],
-            "Clinical Paragraph Summary": doc["text"]
-        })
-    df = pd.DataFrame(df_data)
-    
-    patient_filter = st.selectbox("Filter Registry by Patient ID", options=["All"] + sorted(list(df["Patient ID"].unique())))
-    
-    if patient_filter != "All":
-        filtered_df = df[df["Patient ID"] == patient_filter]
-    else:
-        filtered_df = df
-        
-    st.dataframe(filtered_df, use_container_width=True)
-
+    try:
+        res = requests.get(f"{BACKEND_URL}/api/patients")
+        if res.status_code == 200:
+            patients_data = res.json()["data"]
+            df_data = []
+            for doc in patients_data:
+                df_data.append({
+                    "Patient ID": doc["patient_id"],
+                    "Doctor In Charge": doc["doctor_name"],
+                    "Clinical Paragraph Summary": doc["text"]
+                })
+            df = pd.DataFrame(df_data)
+            
+            patient_filter = st.selectbox("Filter Registry by Patient ID", options=["All"] + sorted(list(df["Patient ID"].unique())))
+            
+            if patient_filter != "All":
+                filtered_df = df[df["Patient ID"] == patient_filter]
+            else:
+                filtered_df = df
+                
+            st.dataframe(filtered_df, use_container_width=True)
+        else:
+            st.error("Failed to load patients registry from backend.")
+    except Exception as e:
+        st.error(f"Failed to connect to backend: {e}")
 
 # ----------------- TAB 4: SYSTEM ARCHITECTURE -----------------
 with tab_architecture:
-    st.markdown("### The Doctor's Co-Pilot Architecture")
+    st.markdown("### Decoupled Frontend-Backend Architecture")
+    st.write("This application implements a professional **decoupled architecture**, splitting client-side UI and server-side RAG logic:")
+    
+    col_arch1, col_arch2 = st.columns(2)
+    with col_arch1:
+        st.markdown("""
+        #### 🎨 Streamlit Frontend
+        * **Purpose**: Serves the user interface and handles user inputs.
+        * **Scope**: 
+          * No AI SDK imports.
+          * No API key leakage in client code.
+          * Does not contain prompt strings.
+          * Communicates solely via HTTP REST API to the backend.
+        * **Lifecycle**: Runs a background daemon thread that manages and monitors the FastAPI server.
+        """)
+        
+    with col_arch2:
+        st.markdown("""
+        #### ⚙️ FastAPI Backend
+        * **Purpose**: Hosts the vector database, implements the RAG pipeline, and executes AI models.
+        * **Scope**:
+          * Parses and extracts patient ID (`PT-XXXX`) deterministically.
+          * Manages the LangChain In-Memory Vector Store.
+          * Runs similarity search with metadata pre-filtering.
+          * Formats clinical prompts and makes secure LLM calls to Gemini.
+        """)
+        
     st.markdown("""
-    Below is a visualization of the RAG pipeline used in this challenge. 
-
+    ---
+    #### 📐 Data Flow Diagram
     ```mermaid
-    graph TD
-        A[Doctor Query] --> B{{Does Query contain Patient ID? e.g., PT-8829}}
+    sequenceDiagram
+        autonumber
+        actor Doctor as Physician / User
+        participant FE as Streamlit Frontend (app.py)
+        participant BE as FastAPI Backend (backend.py)
+        participant VDB as Vector Store (LangChain)
+        participant LLM as Gemini API (Google Cloud)
         
-        subgraph Deterministic Pre-Filtering
-            B -- Yes --> C[Extract Patient ID via Regular Expression]
-            C --> D[Create Metadata Filter: patient_id == PT-8829]
+        Doctor->>FE: Click suggestion / Type query
+        FE->>BE: POST /api/query {query, use_filter, k, api_key}
+        Note over BE: Extracts Patient ID (e.g. PT-8829)
+        alt Filtered Mode Active
+            BE->>VDB: Query similarity search with filter (patient_id == PT-8829)
+            VDB-->>BE: Return top 10 chunks strictly for PT-8829
+        else Naive Mode Active
+            BE->>VDB: Query similarity search globally
+            VDB-->>BE: Return top 10 chunks globally (contains leaks!)
         end
-        
-        subgraph Hybrid Vector Store (LangChain + FAISS/In-Memory)
-            E[Vector DB: 50,000 Paragraphs]
-            D --> F[Pre-filtered Vector Subspace]
-            E -.-> F
-            B -- No (Naive Mode) --> G[Search Entire Vector Space]
-            E -.-> G
-        end
-        
-        subgraph Similarity Search & Retrieval
-            F --> H[Query Embeddings Generator text-embedding-004]
-            G --> H
-            H --> I[Execute Cosine Similarity Search]
-            I --> J[Retrieve Top-10 Most Relevant Chunks]
-        end
-        
-        subgraph Clinical Guardrails & Generation
-            J --> K[Format Context with Patient Validation Checks]
-            K --> L[Generate Prompts with Guardrails]
-            L --> M[Invoke LLM: Gemini 1.5 Flash / GPT-4]
-            M --> N[Generate Medically Accurate Summary]
-        end
-        
-        N --> O[Deliver to Doctor's Chat UI]
+        Note over BE: Formats prompt with strict patient ID validation instructions
+        BE->>LLM: Request summary generation (Gemini-1.5-Flash)
+        LLM-->>BE: Return clinical summary response
+        BE-->>FE: Return JSON {query, patient_id, summary, chunks, metrics}
+        FE->>Doctor: Render formatted clinical summary & show chunks
     ```
-
-    ### Key Architectural Highlights:
-    1. **Dual-Path Retrieval System**: Supports both naive semantic search and deterministic metadata-filtered search. Deterministic pre-filtering guarantees complete patient data isolation, preventing accidental HIPAA or clinical safety violations.
-    2. **State-of-the-Art Embedding Engine**: Uses Google's `text-embedding-004` which outputs highly dense 768-dimensional vectors, optimized for capturing semantic clinical relationships.
-    3. **Context-Level Guardrail Prompts**: The LLM prompt explicitly instructs the generator to inspect the patient ID in the metadata tags of each chunk. If a mismatch is detected, the LLM highlights it to the doctor rather than summarizing incorrect data.
-    4. **Hybrid Engineering**: The architecture represents a **hybrid approach**—combining deterministic Python parsing logic (regex) with probabilistic deep learning models (vector embeddings & generative LLMs) to achieve the highest possible safety and accuracy in medical environments.
     """)
